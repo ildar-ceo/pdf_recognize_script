@@ -232,7 +232,8 @@ def get_chars_boxes(orig_image):
     # Конвертируем картинку в серый цвет
     threshval = 150
     gray_image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2GRAY)
-    _, gray_image = cv2.threshold(gray_image, threshval, 255, cv2.THRESH_BINARY_INV)
+    _, gray_image = cv2.threshold(gray_image, threshval, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+    #_, gray_image = cv2.threshold(gray_image, threshval, 255, cv2.THRESH_BINARY_INV)
     
     # Увеличиваем жирность
     kernel = np.ones((2, 2), np.uint8)
@@ -248,11 +249,20 @@ def get_chars_boxes(orig_image):
         return True
     
     # Функция убирает большие прямоугольники,
-    # которые скорее всего не являеются буквами
+    # которые скорее всего не являются буквами
     def remove_big_box(box):
         w = box.w
         h = box.h
-        if w > 30 and h > 30 and w * h > 2500:
+        if (w > 50 or h > 50) and w * h > 5000:
+            return False
+        return True
+    
+    # Функция убирает слишком большие прямоугольники,
+    # которые скорее всего не являеются буквами
+    def remove_very_big_box(box):
+        w = box.w
+        h = box.h
+        if w > 50 and h > 50 and w * h > 20000:
             return False
         return True
     
@@ -270,13 +280,22 @@ def get_chars_boxes(orig_image):
     #res["chars_boxes_orig"] = get_words_boxes( dilated_image )
     res["chars_boxes_orig"] = get_words_boxes(
         cv2.bitwise_not(dilated_image),
-        #mode=cv2.RETR_LIST,
+        mode=cv2.RETR_LIST,
+        method=cv2.CHAIN_APPROX_NONE
         #method=cv2.CHAIN_APPROX_TC89_L1
     )
-    res["chars_boxes_with_lines"] = list(filter(remove_small_box,  res["chars_boxes_orig"]))
-    res["chars_boxes_without_lines"] = list(filter(remove_big_box,  res["chars_boxes_with_lines"]))
+    
+    # chars_boxes_with_lines
+    res["chars_boxes_with_lines"] = res["chars_boxes_orig"]
+    res["chars_boxes_with_lines"] = list(filter(remove_small_box,  res["chars_boxes_with_lines"]))
+    res["chars_boxes_with_lines"] = list(filter(remove_very_big_box,  res["chars_boxes_with_lines"]))
+    
+    # chars_boxes_without_lines
+    res["chars_boxes_without_lines"] = res["chars_boxes_with_lines"]
+    res["chars_boxes_without_lines"] = list(filter(remove_big_box,  res["chars_boxes_without_lines"]))
     res["chars_boxes_without_lines"] = list(filter(remove_lines_box,  res["chars_boxes_without_lines"]))
     
+    res["chars_boxes"] = list( res["chars_boxes_with_lines"] )
     res["orig_image"] = orig_image
     res["gray_image"] = gray_image
     res["dilated_image"] = dilated_image
@@ -290,35 +309,59 @@ def get_lines_boxes(res):
     Функция возвращает регионы линий
     """
     
-    dilated_image = res["dilated_image"]
+    # Конвертируем картинку в серый цвет
+    threshval = 200
+    gray_image = cv2.cvtColor(res["orig_image"], cv2.COLOR_BGR2GRAY)
+    _, gray_image = cv2.threshold(gray_image, threshval, 255, cv2.THRESH_BINARY_INV)
+    
+    # Увеличиваем жирность
+    kernel = np.ones((2, 2), np.uint8)
+    dilated_image = cv2.dilate(gray_image, kernel, iterations=1)
+    #dilated_image = gray_image
+    
+    #dilated_image = res["dilated_image"]
     chars_boxes_without_lines = res["chars_boxes_without_lines"]
     
     # Создаем чистое изображение и закрашиваем буквы
     lines_clear_image = dilated_image.copy()
-    for box in chars_boxes_without_lines:
-        cv2.rectangle(lines_clear_image, (box.x1, box.y1), (box.x2, box.y2), 0, -1)
+    #for box in chars_boxes_without_lines:
+    #    cv2.rectangle(lines_clear_image, (box.x1, box.y1), (box.x2, box.y2), 0, -1)
     
-    # Обнаружение вертикальных линий
-    vertical_lines = cv2.HoughLinesP(lines_clear_image, 1, np.pi / 90, \
-        threshold=50, minLineLength=50, maxLineGap=10)
+    # горизонтальные линии
+    def show_horizontal_lines(image):
+        hor = np.ones( (1, 15) )
+        image = cv2.erode(image, hor, iterations=5)
+        image = cv2.dilate(image, hor, iterations=5)
+        return image
     
-    # Обнаружение горизонтальных линий
-    horizontal_lines = cv2.HoughLinesP(lines_clear_image, 1, np.pi / 90, \
-        threshold=50, minLineLength=50, maxLineGap=10)
+    # вертикальные линии
+    def show_vertical_lines(image):
+        ver = np.ones( (15, 1) )
+        image = cv2.erode(image, ver, iterations=5)
+        image = cv2.dilate(image, ver, iterations=5)
+        return image
+    
+    horizontal_lines = show_horizontal_lines(lines_clear_image)
+    vertical_lines = show_vertical_lines(lines_clear_image)
+    lines_combined_image = cv2.add(horizontal_lines, vertical_lines)
+    #lines_clear_image = cv2.add(lines_clear_image, lines_combined_image)
+    
+    # Обнаружение линий
+    lines = cv2.HoughLinesP(
+        lines_combined_image,
+        rho=1, theta=np.pi / 500,
+        threshold=20, minLineLength=20, maxLineGap=5)
     
     lines_boxes = []
     
-    if vertical_lines is not None:
-        for line in vertical_lines:
-            lines_boxes.append( BoxItem(line[0]) )
-    
-    if horizontal_lines is not None:
-        for line in horizontal_lines:
+    if lines is not None:
+        for line in lines:
             x1, y1, x2, y2 = line[0]
             lines_boxes.append( BoxItem(line[0]) )
     
     res["lines_boxes"] = lines_boxes
     res["lines_clear_image"] = lines_clear_image
+    res["lines_combined_image"] = lines_combined_image
     
     return res
 
@@ -347,7 +390,8 @@ def filter_chars_boxes(res):
             return False
         return True
     
-    res["chars_boxes"] = list(filter(remove_crossed_boxes, chars_boxes_with_lines))
+    res["chars_boxes"] = chars_boxes_with_lines
+    #res["chars_boxes"] = list(filter(remove_crossed_boxes, res["chars_boxes"]))
     res["chars_boxes"] = list(filter(remove_big_box, res["chars_boxes"]))
     
     return res
