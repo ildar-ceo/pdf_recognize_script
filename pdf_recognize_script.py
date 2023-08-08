@@ -6,7 +6,6 @@ import numpy as np
 import pytesseract
 import easyocr
 import cv2
-from PIL import Image, ImageDraw
 
 
 def show_image(image, name="", size=(30,20)):
@@ -56,6 +55,23 @@ def get_image_from_pdf(file_name, page_number):
     
     return image
 
+
+def descew_image(image):
+    
+    import PIL
+    from wand.image import Image
+    
+    with Image.from_array(image) as img_wand:
+        
+        #img_wand.deskew(0.4)
+        img_wand.deskew(0.4 * img_wand.quantum_range)
+        
+        img_buffer = np.asarray(bytearray(img_wand.make_blob(format='png')), dtype='uint8')
+        img_pil = PIL.Image.open( io.BytesIO(img_buffer) ).convert("RGB")
+        image2 = np.array(img_pil)
+    
+    return image2
+    
 
 class BoxItem:
     
@@ -241,7 +257,7 @@ def get_chars_boxes(res):
     def remove_small_box(box):
         w = box.w
         h = box.h
-        if w * h < 50:
+        if w * h < 20:
             return False
         return True
     
@@ -250,7 +266,17 @@ def get_chars_boxes(res):
     def remove_big_box(box):
         w = box.w
         h = box.h
-        if w > 50 and h > 50 and w * h > 20000:
+        if w > 30 and h > 30 and w * h > 10000:
+            return False
+        return True
+    
+    # Функция убирает линии
+    def remove_lines_box(box):
+        w = box.w
+        h = box.h
+        if h < 10 and w > 30:
+            return False
+        if w < 10 and h > 30:
             return False
         return True
     
@@ -265,8 +291,12 @@ def get_chars_boxes(res):
     
     # chars_boxes_with_lines
     res["chars_boxes"] = res["chars_boxes_orig"]
-    res["chars_boxes"] = list(filter(remove_small_box,  res["chars_boxes"]))
-    res["chars_boxes"] = list(filter(remove_big_box,  res["chars_boxes"]))
+    res["chars_boxes"] = list(filter(remove_big_box, res["chars_boxes"]))
+    res["chars_boxes"] = list(filter(remove_lines_box, res["chars_boxes"]))
+    res["chars_boxes"] = list(filter(remove_small_box, res["chars_boxes"]))
+    
+    res["gray_image"] = gray_image
+    res["dilated_image"] = dilated_image
     
     return res
 
@@ -281,18 +311,22 @@ def get_lines_boxes(res):
     эти линии с помощью cv2.HoughLinesP
     """
     
+    """
     # Конвертируем картинку в серый цвет
-    threshval = 200
+    threshval = 150
     gray_image = cv2.cvtColor(res["orig_image"], cv2.COLOR_BGR2GRAY)
     _, gray_image = cv2.threshold(gray_image, threshval, 255, cv2.THRESH_BINARY_INV)
     
     # Увеличиваем жирность
     kernel = np.ones((2, 2), np.uint8)
     dilated_image = cv2.dilate(gray_image, kernel, iterations=1)
+    """
+    
+    dilated_image = res["dilated_image"]
     
     # горизонтальные линии
     def show_horizontal_lines(image):
-        hor = np.ones( (1, 20) )
+        hor = np.ones( (1, 30) )
         image = cv2.erode(image, hor, iterations=5)
         image = cv2.dilate(image, hor, iterations=5)
         return image
@@ -306,6 +340,18 @@ def get_lines_boxes(res):
     
     horizontal_lines = show_horizontal_lines(dilated_image)
     vertical_lines = show_vertical_lines(dilated_image)
+    
+    # Сдвинуть горизонтальные линии на 5 пикселей
+    rows, cols = horizontal_lines.shape
+    shift_matrix = np.float32([[1, 0, -5], [0, 1, 0]])
+    horizontal_lines = cv2.warpAffine(horizontal_lines, shift_matrix, (cols, rows))
+    
+    # Сдвинуть вертикальные линии на 5 пикселей
+    rows, cols = vertical_lines.shape
+    shift_matrix = np.float32([[1, 0, 0], [0, 1, -5]])
+    vertical_lines = cv2.warpAffine(vertical_lines, shift_matrix, (cols, rows))
+    
+    # Объединить горизонтальные и вертикальные линии в одно изображение
     lines_clear_image = cv2.add(horizontal_lines, vertical_lines)
     
     # Обнаружение линий
@@ -368,8 +414,10 @@ def get_paragraph_box(res):
     search = ParagraphSearcher(threshold)
     search.init_boxes(res["chars_boxes"])
     search.init_lines(res["lines_boxes"])
-    boxes = search.get_all_paragraph()
-    boxes = merge_rectangles(boxes, 5)
+    res["paragraph_boxes"] = search.get_all_paragraph()
+    res["paragraph_boxes"] = merge_rectangles(res["paragraph_boxes"], 5)
+    
+    return res
 
 
 
