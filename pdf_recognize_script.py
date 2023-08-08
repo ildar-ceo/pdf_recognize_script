@@ -102,13 +102,13 @@ def draw_boxes(image, boxes, color):
         cv2.rectangle(image, (box.x1, box.y1), (box.x2, box.y2), color, 2)
 
 
-def get_words_boxes(image, method=cv2.CHAIN_APPROX_SIMPLE):
+def get_words_boxes(image, mode=cv2.RETR_LIST, method=cv2.CHAIN_APPROX_SIMPLE):
     
     """
     Получает рамки на картинке
     """
     
-    contours, _ = cv2.findContours(image, cv2.RETR_LIST, method)
+    contours, _ = cv2.findContours(image, mode, method)
     boxes = []
     for contour in contours:
         x, y, w, h = cv2.boundingRect(contour)
@@ -160,7 +160,8 @@ def is_rectangle_crossed(box, rectangles, threshold=0):
     """
     
     is_crossed = False
-    for index, res_box in enumerate(rectangles):
+    for index in range(len(rectangles)):
+        res_box = rectangles[index]
         r = is_rectangle_cross(box, res_box, threshold)
         if r is not None:
             is_crossed = True
@@ -220,11 +221,13 @@ def merge_rectangles(boxes, threshold=0):
     return res
 
 
-def get_paragraph_box(orig_image):
+def get_chars_boxes(orig_image):
     
     """
-    Функция получает параграфы по картинке
+    Функция возвращает регионы отдельных букв
     """
+    
+    res = {}
     
     # Конвертируем картинку в серый цвет
     threshval = 150
@@ -233,162 +236,137 @@ def get_paragraph_box(orig_image):
     
     # Увеличиваем жирность
     kernel = np.ones((2, 2), np.uint8)
-    processed_image = cv2.dilate(gray_image, kernel, iterations=1)
+    dilated_image = cv2.dilate(gray_image, kernel, iterations=1)
     
-    # Функция которая должна определить
-    # является ли прямоугольник буквой
-    # или нет. Определяет по площади
-    def check_chars_box(detect_lines=True):
-        def f(box):
-            w = box.w
-            h = box.h
-            if w * h < 40:
-                return False
-            if not detect_lines:
-                if h < 10:
-                    return False
-                if w < 10 and h > 15:
-                    return False
-            if h > 25 and w * h > 1000:
-                return False
-            return True
-        return f
-    
-    # Получает boxes для каждой буквы
-    chars_boxes_orig = get_words_boxes( cv2.bitwise_not(processed_image) )
-    chars_boxes_1 = list(filter(check_chars_box(False), chars_boxes_orig))
-    chars_boxes_2 = list(filter(check_chars_box(True), chars_boxes_orig))
-    
-    # Создаем чистое изображение и закрашиваем буквы
-    clear_image = processed_image.copy()
-    for box in chars_boxes_1:
-        cv2.rectangle(clear_image, (box.x1, box.y1), (box.x2, box.y2), 0, -1)
-    
-    # Увеличиваем жирность линий
-    #kernel = np.ones((2, 2), np.uint8)
-    #clear_image = cv2.dilate(clear_image, kernel, iterations=1)
-    
-    # Детектор таблицы. Функция 1
-    def detect_lines_1(clear_image):
-        
-        # Обнаружение вертикальных линий
-        vertical_lines = cv2.HoughLinesP(clear_image, 1, np.pi / 90, \
-            threshold=50, minLineLength=20, maxLineGap=20)
-
-        # Обнаружение горизонтальных линий
-        horizontal_lines = cv2.HoughLinesP(clear_image, 1, np.pi / 90, \
-            threshold=50, minLineLength=20, maxLineGap=20)
-        
-        # Создаем новую картинку с таблицами
-        lines_image = np.zeros(clear_image.shape, dtype=np.uint8)
-
-        for line in vertical_lines:
-            x1, y1, x2, y2 = line[0]
-            cv2.line(lines_image, (x1-2, y1), (x2-2, y2), (255, 255, 255), 4)
-
-        for line in horizontal_lines:
-            x1, y1, x2, y2 = line[0]
-            cv2.line(lines_image, (x1, y1-2), (x2, y2-2), (255, 255, 255), 4)
-        
-        return lines_image
-    
-    # горизонтальные линии
-    def show_horizontal_lines(image):
-        hor = np.array([[1,1,1,1,1,1,1]])
-        image = cv2.erode(image, hor, iterations=5)
-        image = cv2.dilate(image, hor, iterations=5)
-        return image
-    
-    # вертикальные линии
-    def show_vertical_lines(image):
-        ver = np.array([[1],
-                [1],
-                [1],
-                [1],
-                [1],
-                [1],
-                [1]])
-        image = cv2.erode(image, ver, iterations=5)
-        image = cv2.dilate(image, ver, iterations=5)
-        return image
-    
-    # Детектор таблицы. Функция 2
-    def detect_lines_2(clear_image):
-        
-        horizontal_lines = show_horizontal_lines(clear_image)
-        vertical_lines = show_vertical_lines(clear_image)
-        combined_image = cv2.add(horizontal_lines, vertical_lines)
-        return combined_image
-    
-    # Применяем обе функции
-    lines_image_1 = detect_lines_1(clear_image)
-    lines_image_2 = detect_lines_2(clear_image)
-    lines_image = cv2.add(lines_image_1, lines_image_2)
-    
-    # Функция которая должна определить
-    # является ли прямоугольник частью таблицы
-    def check_table_box(box):
+    # Функция убирает маленькие прямоугольники,
+    # которые скорее всего не являеются буквами
+    def remove_small_box(box):
         w = box.w
         h = box.h
-        if w * h < 40:
+        if w * h < 50:
             return False
-        if h < 25:
+        return True
+    
+    # Функция убирает большие прямоугольники,
+    # которые скорее всего не являеются буквами
+    def remove_big_box(box):
+        w = box.w
+        h = box.h
+        if w > 30 and h > 30 and w * h > 2500:
             return False
-        if w > 100:
-            return True
-        if w * h > 1000:
-            return True
-        return False
+        return True
     
-    # Получаем границы таблицы
-    #table_boxes = get_words_boxes(cv2.bitwise_not(lines_image), cv2.CHAIN_APPROX_TC89_L1)
-    table_boxes = get_words_boxes(lines_image)
-    table_boxes = list(filter(check_table_box, table_boxes))
+    # Функция убирает линии
+    def remove_lines_box(box):
+        w = box.w
+        h = box.h
+        if h < 10:
+            return False
+        if w < 10 and h > 15:
+            return False
+        return True
     
-    # Получаем ячейки таблицы, которые не пересекаются никакими другими боксами
-    table_boxes = get_uncrossed_rectangles(table_boxes)
+    # Получает boxes для каждой буквы
+    #res["chars_boxes_orig"] = get_words_boxes( dilated_image )
+    res["chars_boxes_orig"] = get_words_boxes(
+        cv2.bitwise_not(dilated_image),
+        #mode=cv2.RETR_LIST,
+        #method=cv2.CHAIN_APPROX_TC89_L1
+    )
+    res["chars_boxes_with_lines"] = list(filter(remove_small_box,  res["chars_boxes_orig"]))
+    res["chars_boxes_without_lines"] = list(filter(remove_big_box,  res["chars_boxes_with_lines"]))
+    res["chars_boxes_without_lines"] = list(filter(remove_lines_box,  res["chars_boxes_without_lines"]))
     
-    # Объединяем chars_boxes и table_boxes в параграфы
-    boxes = merge_paragraph_box_with_tables(chars_boxes_2, table_boxes)
+    res["orig_image"] = orig_image
+    res["gray_image"] = gray_image
+    res["dilated_image"] = dilated_image
     
-    # Расширить немного регионы
-    #def expand_table(box):
-    #    box.resize( (box.x1 - 4, box.y1 - 4, box.x2 + 4, box.y2 + 4) )
-    #    return box
-    #table_boxes = list(filter(expand_table, table_boxes))
-    
-    return {
-        "boxes": boxes,
-        "orig_image": orig_image,
-        "gray_image": gray_image,
-        "chars_boxes": chars_boxes_2,
-        "table_boxes": table_boxes,
-        "processed_image": processed_image,
-        "clear_image": clear_image,
-        "lines_image": lines_image,
-    }
+    return res
 
 
-def merge_paragraph_box_with_tables(chars_boxes, table_boxes):
+def get_lines_boxes(res):
     
     """
-    Возвращает параграфы, на основе chars_boxes и table_boxes
+    Функция возвращает регионы линий
     """
     
-    boxes = []
+    dilated_image = res["dilated_image"]
+    chars_boxes_without_lines = res["chars_boxes_without_lines"]
     
-    for box in chars_boxes:
-        is_crossed = is_rectangle_crossed(box, table_boxes)
-        if not is_crossed:
-            boxes.append(box)
+    # Создаем чистое изображение и закрашиваем буквы
+    lines_clear_image = dilated_image.copy()
+    for box in chars_boxes_without_lines:
+        cv2.rectangle(lines_clear_image, (box.x1, box.y1), (box.x2, box.y2), 0, -1)
+    
+    # Обнаружение вертикальных линий
+    vertical_lines = cv2.HoughLinesP(lines_clear_image, 1, np.pi / 90, \
+        threshold=50, minLineLength=50, maxLineGap=10)
+    
+    # Обнаружение горизонтальных линий
+    horizontal_lines = cv2.HoughLinesP(lines_clear_image, 1, np.pi / 90, \
+        threshold=50, minLineLength=50, maxLineGap=10)
+    
+    lines_boxes = []
+    
+    if vertical_lines is not None:
+        for line in vertical_lines:
+            lines_boxes.append( BoxItem(line[0]) )
+    
+    if horizontal_lines is not None:
+        for line in horizontal_lines:
+            x1, y1, x2, y2 = line[0]
+            lines_boxes.append( BoxItem(line[0]) )
+    
+    res["lines_boxes"] = lines_boxes
+    res["lines_clear_image"] = lines_clear_image
+    
+    return res
+
+
+def filter_chars_boxes(res):
+    
+    """
+    Функция применяет фильтр к chars_boxes_with_lines
+    и убирает прямоугольники, которые пересекаются с lines_boxes
+    """
+    
+    lines_boxes = res["lines_boxes"]
+    chars_boxes_with_lines = res["chars_boxes_with_lines"]
+    
+    def remove_crossed_boxes(box):
+        if is_rectangle_crossed(box, lines_boxes):
+            return False
+        return True
+    
+    # Функция убирает слишком большие прямоугольники,
+    # которые скорее всего не являеются буквами
+    def remove_big_box(box):
+        w = box.w
+        h = box.h
+        if w > 50 and h > 50 and w * h > 20000:
+            return False
+        return True
+    
+    res["chars_boxes"] = list(filter(remove_crossed_boxes, chars_boxes_with_lines))
+    res["chars_boxes"] = list(filter(remove_big_box, res["chars_boxes"]))
+    
+    return res
+
+
+def get_paragraph_box(res):
+    
+    """
+    Функция получает параграфы, объединяя chars_boxes методом
+    поиска в ширину, а также учитывая lines_boxes.
+    """
     
     threshold = 25
-    search = ParagraphSearcher(boxes, threshold)
+    search = ParagraphSearcher(threshold)
+    search.init_boxes(res["chars_boxes"])
+    search.init_lines(res["lines_boxes"])
     boxes = search.get_all_paragraph()
     boxes = merge_rectangles(boxes, 5)
-    boxes.extend(table_boxes)
-    
-    return boxes
+
 
 
 def recognize_text_in_boxes(image, boxes, kind="tesseract", easyocr_reader=None):
@@ -413,13 +391,36 @@ class ParagraphSearcher:
     Класс, который объединяет боксы в параграфы методом поиска в ширину
     """
     
-    def __init__(self, boxes, threshold):
+    def __init__(self, threshold):
         
-        self.boxes = [ box.get_box_item() for box in boxes ]
-        self.matrix = [1] * len(self.boxes)
+        self.boxes = []
+        self.matrix = []
+        self.lines = []
         self.hash = {}
         self.threshold = threshold
         self.threshold2 = threshold * threshold
+        
+        self.directions = {
+            0: [0, 0],
+            1: [-1, -1],
+            2: [0, -1],
+            3: [1, -1],
+            4: [1, 0],
+            5: [1, 1],
+            6: [0, 1],
+            7: [-1, 1],
+            8: [-1, 0],
+        }
+    
+    
+    def init_boxes(self, boxes):
+        
+        """
+        Инициируем прямоугольники
+        """
+        
+        self.boxes = [ box.get_box_item() for box in boxes ]
+        self.matrix = [1] * len(self.boxes)
         
         for box_index in range(len(self.boxes)):
             
@@ -436,19 +437,16 @@ class ParagraphSearcher:
             self.addPoint( x1 + w // 2, y1 + h, box_index )
             self.addPoint( x1, y1 + h, box_index )
             self.addPoint( x1, y1 + h // 2, box_index )
-        
-        self.directions = {
-            0: [0, 0],
-            1: [-1, -1],
-            2: [0, -1],
-            3: [1, -1],
-            4: [1, 0],
-            5: [1, 1],
-            6: [0, 1],
-            7: [-1, 1],
-            8: [-1, 0],
-        }
     
+    
+    def init_lines(self, lines):
+        
+        """
+        Инициируем линии
+        """
+        
+        self.lines = [ lines.get_box_item() for line in lines ]
+        
     
     def addPoint(self, x, y, box_index):
         
