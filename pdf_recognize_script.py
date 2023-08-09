@@ -85,10 +85,21 @@ class BoxItem:
         self.box_number = None
     
     def resize(self, size):
-        self.x1 = size[0]
-        self.y1 = size[1]
-        self.x2 = size[2]
-        self.y2 = size[3]
+        
+        if size[0] < size[2]:
+            self.x1 = size[0]
+            self.x2 = size[2]
+        else:
+            self.x2 = size[0]
+            self.x1 = size[2]
+        
+        if size[1] < size[3]:
+            self.y1 = size[1]
+            self.y2 = size[3]
+        else:
+            self.y2 = size[1]
+            self.y1 = size[3]
+        
         self.w = size[2] - size[0]
         self.h = size[3] - size[1]
         
@@ -133,6 +144,28 @@ def get_words_boxes(image, mode=cv2.RETR_LIST, method=cv2.CHAIN_APPROX_SIMPLE):
     return boxes
 
 
+def is_line_cross(line1, line2):
+    
+    """
+    Проверяет пересекаются ли линии
+    """
+    
+    a = np.array([[line1.x1, line1.y1], [line1.x2, line1.y2]])
+    b = np.array([[line2.x1, line2.y1], [line2.x2, line2.y2]])
+    
+    v1 = np.cross(a[1] - a[0], b[0] - a[0])
+    v2 = np.cross(a[1] - a[0], b[1] - a[0])
+    
+    if np.sign(v1) != np.sign(v2):
+        v3 = np.cross(b[1] - b[0], a[0] - b[0])
+        v4 = np.cross(b[1] - b[0], a[1] - b[0])
+        
+        if np.sign(v3) != np.sign(v4):
+            return True
+    
+    return False
+
+
 def is_rectangle_cross(A, B, threshold=0):
     
     """
@@ -155,17 +188,12 @@ def is_rectangle_cross(A, B, threshold=0):
     Cy2 += threshold
     
     if Cx1 >= Cx2:
-        return None
+        return False
     
     if Cy1 >= Cy2:
-        return None
+        return False
     
-    x1 = min(Ax1, Bx1)
-    y1 = min(Ay1, By1)
-    x2 = max(Ax2, Bx2)
-    y2 = max(Ay2, By2)
-    
-    return BoxItem( (x1, y1, x2, y2) )
+    return True
 
 
 def is_rectangle_crossed(box, rectangles, threshold=0):
@@ -175,16 +203,29 @@ def is_rectangle_crossed(box, rectangles, threshold=0):
     прямоугольников rectangles
     """
     
-    is_crossed = False
     for index in range(len(rectangles)):
         res_box = rectangles[index]
         r = is_rectangle_cross(box, res_box, threshold)
-        if r is not None:
-            is_crossed = True
-            break
+        if r:
+            return True
     
-    return is_crossed
+    return False
 
+
+def is_line_rectangle_crossed(line, rectangles):
+    
+    """
+    Проверяет пересекает ли линия хотя бы один прямоугольник
+    """
+    
+    for index in range(len(rectangles)):
+        res_box = rectangles[index]
+        r = is_line_cross(line, res_box)
+        if r:
+            return True
+    
+    return False
+    
 
 def get_uncrossed_rectangles(boxes):
     
@@ -203,38 +244,6 @@ def get_uncrossed_rectangles(boxes):
             result.append(box)
     
     return result
-
-
-def merge_rectangles(boxes, threshold=0):
-    
-    """
-    Функция объединяет прямоугольники, которые расоложены рядом
-    """
-    
-    res = []
-    boxes = sorted(boxes, reverse=True, \
-        key=lambda box: box.w * box.h)
-    
-    merged_boxes = []
-    for box in boxes:
-        
-        merged = False
-        for index, merged_box in enumerate(merged_boxes):
-            res = is_rectangle_cross(box, merged_box, threshold)
-            if res is not None:
-                merged_boxes[index] = res
-                merged = True
-                #break
-        
-        if not merged:
-            merged_boxes.append(box.copy())
-    
-    res = []
-    for box in merged_boxes:
-        if not(box in res):
-            res.append(box)
-    
-    return res
 
 
 def get_chars_boxes(res):
@@ -403,19 +412,20 @@ def filter_chars_boxes(res):
     return res
 
 
-def get_paragraph_box(res):
+def get_paragraph_box(res, threshold=25):
     
     """
     Функция получает параграфы, объединяя chars_boxes методом
     поиска в ширину, а также учитывая lines_boxes.
     """
     
-    threshold = 25
     search = ParagraphSearcher(threshold)
     search.init_boxes(res["chars_boxes"])
     search.init_lines(res["lines_boxes"])
-    res["paragraph_boxes"] = search.get_all_paragraph()
-    res["paragraph_boxes"] = merge_rectangles(res["paragraph_boxes"], 5)
+    search.get_all_paragraph()
+    search.merge(5)
+    
+    res["paragraph_boxes"] = list(search.paragraphes)
     
     return res
 
@@ -446,11 +456,15 @@ class ParagraphSearcher:
     def __init__(self, threshold):
         
         self.boxes = []
-        self.matrix = []
+        self.boxes_hash = {}
+        self.boxes_matrix = []
         self.lines = []
-        self.hash = {}
+        self.lines_hash_x = {}
+        self.lines_hash_y = {}
+        self.paragraphes = []
         self.threshold = threshold
         self.threshold2 = threshold * threshold
+        self.mode = None
         
         self.directions = {
             0: [0, 0],
@@ -471,13 +485,13 @@ class ParagraphSearcher:
         Инициируем прямоугольники
         """
         
-        self.boxes = [ box.get_box_item() for box in boxes ]
-        self.matrix = [1] * len(self.boxes)
+        self.boxes = list(boxes)
+        self.boxes_matrix = [1] * len(self.boxes)
         
         for box_index in range(len(self.boxes)):
             
             box = self.boxes[box_index]
-            x1, y1, x2, y2 = box
+            x1, y1, x2, y2 = box.get_box_item()
             w = x2 - x1
             h = y2 - y1
             
@@ -491,34 +505,96 @@ class ParagraphSearcher:
             self.addPoint( x1, y1 + h // 2, box_index )
     
     
+    def addPoint(self, x, y, box_index):
+        
+        x1 = x // self.threshold
+        y1 = y // self.threshold
+        
+        if not(x1 in self.boxes_hash):
+            self.boxes_hash[x1] = {}
+        
+        if not(y1 in self.boxes_hash[x1]):
+            self.boxes_hash[x1][y1] = []
+        
+        if not((x, y) in self.boxes_hash[x1][y1]):
+            self.boxes_hash[x1][y1].append( (x, y, box_index) )
+    
+    
     def init_lines(self, lines):
         
         """
         Инициируем линии
         """
         
-        self.lines = [ lines.get_box_item() for line in lines ]
-        
+        self.lines = list(lines)
+        for line in self.lines:
+            
+            x1 = line.x1 // self.threshold
+            x2 = line.x2 // self.threshold
+            y1 = line.y1 // self.threshold
+            y2 = line.y2 // self.threshold
+            
+            if not(x1 in self.lines_hash_x):
+                self.lines_hash_x[x1] = []
+            if not(x2 in self.lines_hash_x):
+                self.lines_hash_x[x2] = []
+            if not(y1 in self.lines_hash_y):
+                self.lines_hash_y[y1] = []
+            if not(y2 in self.lines_hash_y):
+                self.lines_hash_y[y2] = []
+            
+            self.lines_hash_x[x1].append( line )
+            self.lines_hash_x[x2].append( line )
+            self.lines_hash_y[y1].append( line )
+            self.lines_hash_y[y2].append( line )
     
-    def addPoint(self, x, y, box_index):
-        
-        x1 = x // self.threshold
-        y1 = y // self.threshold
-        
-        if not(x1 in self.hash):
-            self.hash[x1] = {}
-        
-        if not(y1 in self.hash[x1]):
-            self.hash[x1][y1] = []
-        
-        if not((x, y) in self.hash[x1][y1]):
-            self.hash[x1][y1].append( (x, y, box_index) )
     
+    def get_lines_from_hash(self, line):
+        
+        """
+        Возвращает список линий, находящихся в границах x1-x2 и y1-y2
+        """
+        
+        x1 = line.x1 // self.threshold
+        x2 = line.x2 // self.threshold
+        y1 = line.y1 // self.threshold
+        y2 = line.y2 // self.threshold
+        
+        res = []
+        
+        for x in range(x1, x2 + 1):
+            if x in self.lines_hash_x:
+                res.extend( self.lines_hash_x[x] )
+        
+        for y in range(y1, y2 + 1):
+            if y in self.lines_hash_y:
+                res.extend( self.lines_hash_y[y] )
+        
+        return res
+    
+    
+    def is_lines_crossed(self, line):
+        
+        """
+        Проверяет пересекает ли линия line
+        ограничивающие линии self.lines
+        """
+        
+        lines = self.get_lines_from_hash(line)
+        is_line_crossed = is_line_rectangle_crossed(line, lines)
+        
+        return is_line_crossed
+        
     
     def get_nearest_boxes(self, box_item):
         
+        """
+        Функция возвращает ближающие прямоугольники
+        рядом с box_item на расстоянии self.threshold
+        """
+        
         res = []
-        x1, y1, x2, y2 = box_item
+        x1, y1, x2, y2 = box_item.get_box_item()
         w = x2 - x1
         h = y2 - y1
         
@@ -553,9 +629,9 @@ class ParagraphSearcher:
         for point in nearest_search_points:
             x2, y2 = point
             
-            if x2 in self.hash:
-                if y2 in self.hash[x2]:
-                    hash_points = self.hash[x2][y2]
+            if x2 in self.boxes_hash:
+                if y2 in self.boxes_hash[x2]:
+                    hash_points = self.boxes_hash[x2][y2]
                     for hash_point in hash_points:
                         
                         x3, y3, box_index = hash_point
@@ -568,12 +644,16 @@ class ParagraphSearcher:
     
     def get_paragraph(self, box_index):
         
+        """
+        Функция ищет параграф методом поиска в ширину, начиная с box_index
+        """
+        
         queue = collections.deque()
         queue.append( box_index )
-        self.matrix[box_index] = 0
+        self.boxes_matrix[box_index] = 0
         
         box_item = self.boxes[box_index]
-        x1, y1, x2, y2 = box_item
+        x1, y1, x2, y2 = box_item.get_box_item()
         paragraph = {
             "x": x1,
             "y": y1,
@@ -585,24 +665,36 @@ class ParagraphSearcher:
         
             box_index = queue.pop()
             box_item = self.boxes[box_index]
-           
-            x1, y1, x2, y2 = box_item
-            
-            if paragraph["x"] > x1:
-                paragraph["x"] = x1
-            if paragraph["y"] > y1:
-                paragraph["y"] = y1
-            if paragraph["right"] < x2:
-                paragraph["right"] = x2
-            if paragraph["bottom"] < y2:
-                paragraph["bottom"] = y2
+            box_item_center_point = box_item.get_box_center()
             
             neighbors_indexes = self.get_nearest_boxes(box_item)
             
             for index in neighbors_indexes:
-                if self.matrix[index] == 1:
-                    self.matrix[index] = 0
-                    queue.append(index)
+                if self.boxes_matrix[index] == 1:
+                    
+                    neighbor_box_item = self.boxes[index]
+                    neighbor_box_center_point = neighbor_box_item.get_box_center()
+                    line = BoxItem( (
+                        box_item_center_point[0], box_item_center_point[1],
+                        neighbor_box_center_point[0], neighbor_box_center_point[1]
+                    ) )
+                    
+                    if not self.is_lines_crossed(line):
+                        
+                        self.boxes_matrix[index] = 0
+                        
+                        # Расширить границы параграфа
+                        if paragraph["x"] > neighbor_box_item.x1:
+                            paragraph["x"] = neighbor_box_item.x1
+                        if paragraph["y"] > neighbor_box_item.y1:
+                            paragraph["y"] = neighbor_box_item.y1
+                        if paragraph["right"] < neighbor_box_item.x2:
+                            paragraph["right"] = neighbor_box_item.x2
+                        if paragraph["bottom"] < neighbor_box_item.y2:
+                            paragraph["bottom"] = neighbor_box_item.y2
+                        
+                        # Добавить в очередь
+                        queue.append(index)
         
         paragraph["w"] = paragraph["right"] - paragraph["x"]
         paragraph["h"] = paragraph["bottom"] - paragraph["y"]
@@ -621,7 +713,7 @@ class ParagraphSearcher:
         box_index = -1
         
         try:
-            box_index = self.matrix.index(1)
+            box_index = self.boxes_matrix.index(1)
         except:
             pass
         
@@ -630,7 +722,8 @@ class ParagraphSearcher:
     
     def get_all_paragraph(self):
         
-        res = []
+        self.mode = "paragraph"
+        self.paragraphes = []
         
         box_index = self.get_next_index()
         
@@ -639,12 +732,51 @@ class ParagraphSearcher:
             paragraph = self.get_paragraph(box_index)
             
             if paragraph is not None:
-                res.append(paragraph)
+                self.paragraphes.append(paragraph)
             
             box_index = self.get_next_index()
+    
+    
+    def merge(self, threshold=0):
+        
+        """
+        Функция объединяет параграфы, которые расоложены рядом
+        """
+        
+        boxes = sorted(self.paragraphes, reverse=True, \
+            key=lambda box: box.w * box.h)
+        
+        merged_boxes = []
+        for box in boxes:
             
-        return res
-
+            box_center_point = box.get_box_center()
+            
+            merged = False
+            for index, merged_box in enumerate(merged_boxes):
+                
+                merged_box_center_point = merged_box.get_box_center()
+                line = BoxItem( (box_center_point[0], box_center_point[1],
+                    merged_box_center_point[0], merged_box_center_point[1]) )
+                
+                if not self.is_lines_crossed(line):
+                    if is_rectangle_cross(box, merged_box, threshold):
+                        
+                        x1 = min(box.x1, merged_box.x1)
+                        y1 = min(box.y1, merged_box.y1)
+                        x2 = max(box.x2, merged_box.x2)
+                        y2 = max(box.y2, merged_box.y2)
+                        
+                        merged_boxes[index] = BoxItem( (x1, y1, x2, y2) )
+                        merged = True
+            
+            if not merged:
+                merged_boxes.append(box.copy())
+        
+        self.paragraphes = []
+        for box in merged_boxes:
+            if not(box in self.paragraphes):
+                self.paragraphes.append(box)
+    
 
 # Ключевые слова для категории ФОТ
 TEXT_CATEGORY_SUMMA = ['всех', 'годагодов', 'годов', 'годоф', 'гфзп',
