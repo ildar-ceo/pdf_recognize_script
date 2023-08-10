@@ -425,6 +425,7 @@ def get_paragraph_boxes(res, paragraph_threshold=25, line_threshold=10):
     """
     
     search = ParagraphSearcher()
+    search.set_size(res["orig_image"].shape)
     search.set_mode("paragraph", paragraph_threshold, line_threshold)
     search.init_boxes(res["chars_boxes"])
     search.init_lines(res["lines_boxes"])
@@ -505,16 +506,8 @@ class BoxHash:
         }
         
         self.kind = kind
-        self.init(items)
-    
-    
-    def init(self, items):
-        
-        """
-        Инициируем прямоугольники
-        """
-        
         self.items = list(items)
+        
         for box_index in range(len(self.items)):
             
             box = self.items[box_index]
@@ -522,38 +515,22 @@ class BoxHash:
             if self.kind == "box":
                 points = box.get_box_points()
                 for point in points:
-                    self.addPoint( point, box_index )
+                    
+                    x, y = point
+                    self.add_point( x, y, box_index )
             
             if self.kind == "line":
-                
-                x1 = box.x1 // self.threshold
-                x2 = box.x2 // self.threshold
-                y1 = box.y1 // self.threshold
-                y2 = box.y2 // self.threshold
-                
-                if not(x1 in self.items_hash_x):
-                    self.items_hash_x[x1] = []
-                if not(x2 in self.items_hash_x):
-                    self.items_hash_x[x2] = []
-                
-                if not(y1 in self.items_hash_y):
-                    self.items_hash_y[y1] = []
-                if not(y2 in self.items_hash_y):
-                    self.items_hash_y[y2] = []
-                
-                self.items_hash_x[x1].append( box )
-                self.items_hash_x[x2].append( box )
-                self.items_hash_y[y1].append( box )
-                self.items_hash_y[y2].append( box )
+                points = self.draw_line_bresenham(box, True)
+                for point in points:
+                    self.add_point(point[0], point[1], box_index)
     
     
-    def addPoint(self, point, box_index):
+    def add_point(self, x, y, box_index):
         
         """
-        Добавить точку
+        Добавить точку в кэш
         """
         
-        x, y = point
         x1 = x // self.threshold
         y1 = y // self.threshold
         
@@ -615,31 +592,92 @@ class BoxHash:
         return res
     
     
-    def is_line_cross(self, line):
+    def draw_line_bresenham(self, line, is_bold=False):
         
+        """
+        Рисует линию алгоритмом Брезенхема
+        """
+        
+        x1 = line.x1
+        x2 = line.x2
+        y1 = line.y1
+        y2 = line.y2
+        
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        steep = dy > dx
+        
+        if steep:
+            x1, y1 = y1, x1
+            x2, y2 = y2, x2
+        
+        if x1 > x2:
+            x1, x2 = x2, x1
+            y1, y2 = y2, y1
+        
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        error = dx // 2
+        y_step = self.threshold if y1 < y2 else -self.threshold
+        
+        y = y1
+        points = []
+        
+        def add_point(point):
+            if not(point in points):
+                points.append(point)
+        
+        for x in range(x1, x2 + 1, self.threshold):
+            
+            if steep:
+                add_point( (x, y) )
+                if is_bold:
+                    add_point( (x + self.threshold, y) )
+                    add_point( (x - self.threshold, y) )
+                    add_point( (x + self.threshold, y - self.threshold) )
+                    add_point( (x - self.threshold, y - self.threshold) )
+                    add_point( (x + self.threshold, y + self.threshold) )
+                    add_point( (x - self.threshold, y + self.threshold) )
+            else:
+                add_point( (y, x) )
+                if is_bold:
+                    add_point( (y + self.threshold, x) )
+                    add_point( (y - self.threshold, x) )
+                    add_point( (y + self.threshold, x - self.threshold) )
+                    add_point( (y - self.threshold, x - self.threshold) )
+                    add_point( (y + self.threshold, x + self.threshold) )
+                    add_point( (y - self.threshold, x + self.threshold) )
+            
+            error -= dy
+            if error < 0:
+                y += y_step
+                error += dx
+        
+        return points
+    
+    
+    def is_line_cross(self, line):
+
         """
         Проверяет пересекает ли линия line хотя бы одну линию из self.items
         """
         
-        x1 = line.x1 // self.threshold
-        x2 = line.x2 // self.threshold
-        y1 = line.y1 // self.threshold
-        y2 = line.y2 // self.threshold
+        points = self.draw_line_bresenham(line)
         
-        for x in range(x1, x2 + 1):
-            if x in self.items_hash_x:
-                for line2 in self.items_hash_x[x]:
-                    if is_line_cross(line, line2):
-                        return True
-        
-        for y in range(y1, y2 + 1):
-            if y in self.items_hash_y:
-                for line2 in self.items_hash_y[y]:
-                    if is_line_cross(line, line2):
-                        return True
-        
+        for point in points:
+            x, y = point
+            x = x // self.threshold
+            y = y // self.threshold
+            if x in self.points_hash:
+                if y in self.points_hash[x]:
+                    for hash_point in self.points_hash[x][y]:
+                        _, _, index = hash_point
+                        line2 = self.items[index]
+                        if is_line_cross(line, line2):
+                            return True
+            
         return False
-    
+
 
 class ParagraphSearcher:
     
@@ -657,6 +695,15 @@ class ParagraphSearcher:
         self.current_line_y = None
         self.paragraph_threshold = 25
         self.line_threshold = 10
+    
+    
+    def set_size(self, size):
+        
+        """
+        Установить размер картинки
+        """
+        
+        self.size = size
     
     
     def set_mode(self, mode, paragraph_threshold=25, line_threshold=10):
