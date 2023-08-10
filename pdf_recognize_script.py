@@ -90,22 +90,31 @@ class BoxItem:
     
     def resize(self, size):
         
-        if size[0] < size[2]:
-            self.x1 = size[0]
-            self.x2 = size[2]
+        if isinstance(size, BoxItem):
+            
+            self.x1 = size.x1
+            self.x2 = size.x2
+            self.y1 = size.y1
+            self.y2 = size.y2
+            
         else:
-            self.x2 = size[0]
-            self.x1 = size[2]
         
-        if size[1] < size[3]:
-            self.y1 = size[1]
-            self.y2 = size[3]
-        else:
-            self.y2 = size[1]
-            self.y1 = size[3]
+            if size[0] < size[2]:
+                self.x1 = size[0]
+                self.x2 = size[2]
+            else:
+                self.x2 = size[0]
+                self.x1 = size[2]
+            
+            if size[1] < size[3]:
+                self.y1 = size[1]
+                self.y2 = size[3]
+            else:
+                self.y2 = size[1]
+                self.y1 = size[3]
         
-        self.w = size[2] - size[0]
-        self.h = size[3] - size[1]
+        self.w = self.x2 - self.x1
+        self.h = self.y2 - self.y1
         
         self.center_x = (self.x1 + self.x2) // 2
         self.center_y = (self.y1 + self.y2) // 2
@@ -140,6 +149,7 @@ class BoxItem:
             (x1, y1 + h),
             (x1, y1 + h // 2),
         ]
+    
     
     def copy(self):
         item = BoxItem( self.get_box_item() )
@@ -698,12 +708,8 @@ class ParagraphSearcher:
         self.boxes_matrix[box_index] = 0
         
         box_item = self.boxes.items[box_index]
-        paragraph = {
-            "x1": box_item.x1,
-            "y1": box_item.y1,
-            "x2": box_item.x2,
-            "y2": box_item.y2,
-        }
+        paragraph = BoxItem( box_item )
+        copy_paragraph = BoxItem( box_item )
         self.current_line_y = box_item.center_y
         
         while len(queue) > 0:
@@ -713,14 +719,7 @@ class ParagraphSearcher:
             box_item_center_point = box_item.get_box_center()
             
             # Расширить границы параграфа
-            if paragraph["x1"] > box_item.x1:
-                paragraph["x1"] = box_item.x1
-            if paragraph["y1"] > box_item.y1:
-                paragraph["y1"] = box_item.y1
-            if paragraph["x2"] < box_item.x2:
-                paragraph["x2"] = box_item.x2
-            if paragraph["y2"] < box_item.y2:
-                paragraph["y2"] = box_item.y2
+            extend_paragraph(paragraph, box_item)
             
             neighbors_indexes = self.boxes.get_nearest_items(box_index)
             
@@ -740,6 +739,12 @@ class ParagraphSearcher:
                             > self.line_threshold:
                             break
                     
+                    # Расширить границы параграфа
+                    #copy_paragraph.resize( paragraph )
+                    #extend_paragraph(copy_paragraph, neighbor_box_item)
+                    
+                    # Если новый параграф пересекает линию, то break
+                    #if self.lines.is_line_cross(copy_paragraph):
                     if self.lines.is_line_cross(line):
                         break
                     
@@ -747,16 +752,7 @@ class ParagraphSearcher:
                     self.boxes_matrix[index] = 0
                     queue.append(index)
         
-        paragraph["w"] = paragraph["x2"] - paragraph["x1"]
-        paragraph["h"] = paragraph["y2"] - paragraph["y1"]
-        
-        if paragraph["w"] <= 0 or paragraph["h"] <= 0:
-            paragraph = None
-    
-        if paragraph is not None:
-            paragraph = ( paragraph["x1"], paragraph["y1"], paragraph["x2"], paragraph["y2"] )
-        
-        return BoxItem(paragraph)
+        return paragraph
     
     
     def get_next_index(self):
@@ -828,6 +824,29 @@ class ParagraphSearcher:
                 self.paragraphes.append(box)
 
 
+def extend_paragraph(paragraph, box):
+    
+    """
+    Расширить параграф
+    """
+    
+    x1 = paragraph.x1
+    x2 = paragraph.x2
+    y1 = paragraph.y1
+    y2 = paragraph.y2
+    
+    if x1 > box.x1:
+        x1 = box.x1
+    if y1 > box.y1:
+        y1 = box.y1
+    if x2 < box.x2:
+        x2 = box.x2
+    if y2 < box.y2:
+        y2 = box.y2
+    
+    paragraph.resize( (x1, y1, x2, y2) )
+    
+
 def merge_chars_boxes_to_lines(chars_boxes, line_threshold=5):
     
     """
@@ -847,37 +866,21 @@ def merge_chars_boxes_to_lines(chars_boxes, line_threshold=5):
             box.center_y - prev_y > line_threshold:
             
             # Создать новую строку или абзац
-            paragraph_boxes.append(
-                BoxItem((paragraph["x1"], paragraph["y1"], paragraph["x2"], paragraph["y2"]))
-            )
+            paragraph_boxes.append(paragraph)
             paragraph = None
         
         if paragraph is None:
-            paragraph = {
-                "x1": box.x1,
-                "y1": box.y1,
-                "x2": box.x2,
-                "y2": box.y2,
-            }
+            paragraph = BoxItem( box )
             
         else:
-            # Создание прямоугольника вокруг символа (сегментация)
-            if paragraph["x1"] > box.x1:
-                paragraph["x1"] = box.x1
-            if paragraph["y1"] > box.y1:
-                paragraph["y1"] = box.y1
-            if paragraph["x2"] < box.x2:
-                paragraph["x2"] = box.x2
-            if paragraph["y2"] < box.y2:
-                paragraph["y2"] = box.y2
+            # Расширить границы параграфа
+            extend_paragraph(paragraph, box)
         
         prev_y = box.center_y
         prev_x = box.x2
     
     if paragraph is not None:
-        paragraph_boxes.append(
-            BoxItem((paragraph["x1"], paragraph["y1"], paragraph["x2"], paragraph["y2"]))
-        )
+        paragraph_boxes.append(paragraph)
     
     return paragraph_boxes
 
