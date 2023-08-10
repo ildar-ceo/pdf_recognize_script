@@ -124,6 +124,23 @@ class BoxItem:
             (self.x1, self.y2),
         ]
     
+    def get_box_points(self):
+        
+        x1, y1, x2, y2 = self.x1, self.y1, self.x2, self.y2
+        w = x2 - x1
+        h = y2 - y1
+        
+        return [
+            (x1, y1),
+            (x1 + w // 2, y1),
+            (x1 + w, y1),
+            (x1 + w, y1 + h // 2),
+            (x1 + w, y1 + h),
+            (x1 + w // 2, y1 + h),
+            (x1, y1 + h),
+            (x1, y1 + h // 2),
+        ]
+    
     def copy(self):
         item = BoxItem( self.get_box_item() )
         item.text = self.text
@@ -226,21 +243,6 @@ def is_rectangle_crossed(box, rectangles, threshold=0):
     
     return False
 
-
-def is_line_rectangle_crossed(line, rectangles):
-    
-    """
-    Проверяет пересекает ли линия хотя бы один прямоугольник
-    """
-    
-    for index in range(len(rectangles)):
-        res_box = rectangles[index]
-        r = is_line_cross(line, res_box)
-        if r:
-            return True
-    
-    return False
-    
 
 def get_uncrossed_rectangles(boxes):
     
@@ -472,12 +474,14 @@ class BoxHash:
     для быстрого поиска ближайщих соседей
     """
     
-    def __init__(self, boxes, threshold):
+    def __init__(self, items, kind, threshold):
         
-        self.boxes = []
-        self.boxes_hash = {}
+        self.items = []
+        self.items_hash_x = {}
+        self.items_hash_y = {}
+        self.points_hash = {}
         self.threshold = threshold
-        
+        self.threshold2 = threshold * threshold
         self.directions = {
             0: [0, 0],
             1: [-1, -1],
@@ -489,85 +493,87 @@ class BoxHash:
             7: [-1, 1],
             8: [-1, 0],
         }
-    
-    
-    def get_box_points(self, box):
         
-        x1, y1, x2, y2 = box.get_box_item()
-        w = x2 - x1
-        h = y2 - y1
-        
-        return [
-            (x1, y1),
-            (x1 + w // 2, y1),
-            (x1 + w, y1),
-            (x1 + w, y1 + h // 2),
-            (x1 + w, y1 + h),
-            (x1 + w // 2, y1 + h),
-            (x1, y1 + h),
-            (x1, y1 + h // 2),
-        ]
+        self.kind = kind
+        self.init(items)
     
     
-    def init_boxes(self, boxes):
+    def init(self, items):
         
         """
         Инициируем прямоугольники
         """
         
-        self.boxes = list(boxes)
-        self.boxes_matrix = [1] * len(self.boxes)
-        
-        if self.mode == "paragraph":
-            self.boxes.sort(key = lambda box: box.w * box.h)
-        
-        elif self.mode == "line":
-            self.boxes.sort(key = lambda box: (box.center_y, box.center_x))
-        
-        for box_index in range(len(self.boxes)):
+        self.items = list(items)
+        for box_index in range(len(self.items)):
             
-            box = self.boxes[box_index]
-            points = self.get_box_points(box)
-            for point in points:
-                self.addPoint( point[0], point[1], box_index )
+            box = self.items[box_index]
             
+            if self.kind == "box":
+                points = box.get_box_points()
+                for point in points:
+                    self.addPoint( point, box_index )
+            
+            if self.kind == "line":
+                
+                x1 = box.x1 // self.threshold
+                x2 = box.x2 // self.threshold
+                y1 = box.y1 // self.threshold
+                y2 = box.y2 // self.threshold
+                
+                if not(x1 in self.items_hash_x):
+                    self.items_hash_x[x1] = []
+                if not(x2 in self.items_hash_x):
+                    self.items_hash_x[x2] = []
+                
+                if not(y1 in self.items_hash_y):
+                    self.items_hash_y[y1] = []
+                if not(y2 in self.items_hash_y):
+                    self.items_hash_y[y2] = []
+                
+                self.items_hash_x[x1].append( box )
+                self.items_hash_x[x2].append( box )
+                self.items_hash_y[y1].append( box )
+                self.items_hash_y[y2].append( box )
     
-    def addPoint(self, x, y, box_index):
+    
+    def addPoint(self, point, box_index):
         
         """
         Добавить точку
         """
         
+        x, y = point
         x1 = x // self.threshold
         y1 = y // self.threshold
         
-        if not(x1 in self.boxes_hash):
-            self.boxes_hash[x1] = {}
+        if not(x1 in self.points_hash):
+            self.points_hash[x1] = {}
         
-        if not(y1 in self.boxes_hash[x1]):
-            self.boxes_hash[x1][y1] = []
+        if not(y1 in self.points_hash[x1]):
+            self.points_hash[x1][y1] = []
         
-        if not((x, y) in self.boxes_hash[x1][y1]):
-            self.boxes_hash[x1][y1].append( (x, y, box_index) )
+        self.points_hash[x1][y1].append( (x, y, box_index) )
     
     
-    def get_nearest_boxes(self, box_item):
+    def get_nearest_items(self, box_index):
         
         """
         Функция возвращает ближающие прямоугольники
-        рядом с box_item на расстоянии self.paragraph_threshold
+        рядом с box_index на расстоянии self.threshold
         """
         
         res = []
         nearest_search_points = []
-        points = self.get_box_points(box_item)
+        
+        box_item = self.items[box_index]
+        points = box_item.get_box_points()
         
         for point in points:
             
             x, y = point
-            
-            x1 = x // self.paragraph_threshold 
-            y1 = y // self.paragraph_threshold
+            x1 = x // self.threshold 
+            y1 = y // self.threshold
             
             for direction in self.directions:
                 dx, dy = self.directions[direction]
@@ -576,22 +582,53 @@ class BoxHash:
                 y2 = y1 + dy
                 
                 if not( (x2, y2) in nearest_search_points ):
-                    nearest_search_points.append( (x2, y2) )
+                    nearest_search_points.append( (x, y, x2, y2) )
         
         for point in nearest_search_points:
-            x2, y2 = point
+            x, y, x2, y2 = point
             
-            if x2 in self.boxes_hash:
-                if y2 in self.boxes_hash[x2]:
-                    hash_points = self.boxes_hash[x2][y2]
+            if x2 in self.points_hash:
+                if y2 in self.points_hash[x2]:
+                    
+                    hash_points = self.points_hash[x2][y2]
                     for hash_point in hash_points:
                         
-                        x3, y3, box_index = hash_point
-                        if (x3 - x) * (x3 - x) + (y3 - y) * (y3 - y) <= self.paragraph_threshold2:
-                            if not(box_index in res):
-                                res.append( box_index )
+                        x3, y3, index = hash_point
+                        box = self.items[index]
+                        
+                        d = math.sqrt((x3 - x) * (x3 - x) + (y3 - y) * (y3 - y))
+                        
+                        if d <= self.threshold:
+                            if not(index in res) and box_index != index:
+                                res.append( index )
         
         return res
+    
+    
+    def is_line_cross(self, line):
+        
+        """
+        Проверяет пересекает ли линия line хотя бы одну линию из self.items
+        """
+        
+        x1 = line.x1 // self.threshold
+        x2 = line.x2 // self.threshold
+        y1 = line.y1 // self.threshold
+        y2 = line.y2 // self.threshold
+        
+        for x in range(x1, x2 + 1):
+            if x in self.items_hash_x:
+                for line2 in self.items_hash_x[x]:
+                    if is_line_cross(line, line2):
+                        return True
+        
+        for y in range(y1, y2 + 1):
+            if y in self.items_hash_y:
+                for line2 in self.items_hash_y[y]:
+                    if is_line_cross(line, line2):
+                        return True
+        
+        return False
     
 
 class ParagraphSearcher:
@@ -603,29 +640,13 @@ class ParagraphSearcher:
     def __init__(self):
         
         self.mode = None
-        self.boxes = []
-        self.boxes_hash = {}
-        self.boxes_matrix = []
-        self.lines = []
-        self.lines_hash_x = {}
-        self.lines_hash_y = {}
+        self.boxes = None
+        self.boxes_matrix = None
+        self.lines = None
         self.paragraphes = []
         self.current_line_y = None
         self.paragraph_threshold = 25
-        self.paragraph_threshold2 = 25 * 25
         self.line_threshold = 10
-        
-        self.directions = {
-            0: [0, 0],
-            1: [-1, -1],
-            2: [0, -1],
-            3: [1, -1],
-            4: [1, 0],
-            5: [1, 1],
-            6: [0, 1],
-            7: [-1, 1],
-            8: [-1, 0],
-        }
     
     
     def set_mode(self, mode, paragraph_threshold=25, line_threshold=10):
@@ -638,7 +659,6 @@ class ParagraphSearcher:
         
         self.mode = mode
         self.paragraph_threshold = paragraph_threshold
-        self.paragraph_threshold2 = paragraph_threshold * paragraph_threshold
         self.line_threshold = line_threshold
         
     
@@ -648,49 +668,14 @@ class ParagraphSearcher:
         Инициируем прямоугольники
         """
         
-        self.boxes = list(boxes)
-        self.boxes_matrix = [1] * len(self.boxes)
-        
         if self.mode == "paragraph":
-            self.boxes.sort(key = lambda box: box.w * box.h)
+            boxes.sort(key = lambda box: box.w * box.h)
         
         elif self.mode == "line":
-            self.boxes.sort(key = lambda box: (box.center_y, box.center_x))
+            boxes.sort(key = lambda box: (box.center_y, box.center_x))
         
-        for box_index in range(len(self.boxes)):
-            
-            box = self.boxes[box_index]
-            x1, y1, x2, y2 = box.get_box_item()
-            w = x2 - x1
-            h = y2 - y1
-            
-            self.addPoint( x1, y1, box_index )
-            self.addPoint( x1 + w // 2, y1, box_index )
-            self.addPoint( x1 + w, y1, box_index )
-            self.addPoint( x1 + w, y1 + h // 2, box_index )
-            self.addPoint( x1 + w, y1 + h, box_index )
-            self.addPoint( x1 + w // 2, y1 + h, box_index )
-            self.addPoint( x1, y1 + h, box_index )
-            self.addPoint( x1, y1 + h // 2, box_index )
-    
-    
-    def addPoint(self, x, y, box_index):
-        
-        """
-        Добавить точку
-        """
-        
-        x1 = x // self.paragraph_threshold
-        y1 = y // self.paragraph_threshold
-        
-        if not(x1 in self.boxes_hash):
-            self.boxes_hash[x1] = {}
-        
-        if not(y1 in self.boxes_hash[x1]):
-            self.boxes_hash[x1][y1] = []
-        
-        if not((x, y) in self.boxes_hash[x1][y1]):
-            self.boxes_hash[x1][y1].append( (x, y, box_index) )
+        self.boxes = BoxHash(boxes, "box", self.paragraph_threshold)
+        self.boxes_matrix = [1] * len(boxes)
     
     
     def init_lines(self, lines):
@@ -699,120 +684,7 @@ class ParagraphSearcher:
         Инициируем линии
         """
         
-        self.lines = list(lines)
-        for line in self.lines:
-            
-            x1 = line.x1 // self.paragraph_threshold
-            x2 = line.x2 // self.paragraph_threshold
-            y1 = line.y1 // self.paragraph_threshold
-            y2 = line.y2 // self.paragraph_threshold
-            
-            if not(x1 in self.lines_hash_x):
-                self.lines_hash_x[x1] = []
-            if not(x2 in self.lines_hash_x):
-                self.lines_hash_x[x2] = []
-            if not(y1 in self.lines_hash_y):
-                self.lines_hash_y[y1] = []
-            if not(y2 in self.lines_hash_y):
-                self.lines_hash_y[y2] = []
-            
-            self.lines_hash_x[x1].append( line )
-            self.lines_hash_x[x2].append( line )
-            self.lines_hash_y[y1].append( line )
-            self.lines_hash_y[y2].append( line )
-    
-    
-    def get_lines_from_hash(self, line):
-        
-        """
-        Возвращает список линий, находящихся в границах x1-x2 и y1-y2
-        """
-        
-        x1 = line.x1 // self.paragraph_threshold
-        x2 = line.x2 // self.paragraph_threshold
-        y1 = line.y1 // self.paragraph_threshold
-        y2 = line.y2 // self.paragraph_threshold
-        
-        res = []
-        
-        for x in range(x1, x2 + 1):
-            if x in self.lines_hash_x:
-                res.extend( self.lines_hash_x[x] )
-        
-        for y in range(y1, y2 + 1):
-            if y in self.lines_hash_y:
-                res.extend( self.lines_hash_y[y] )
-        
-        return res
-    
-    
-    def is_lines_crossed(self, line):
-        
-        """
-        Проверяет пересекает ли линия line
-        ограничивающие линии self.lines
-        """
-        
-        lines = self.get_lines_from_hash(line)
-        is_line_crossed = is_line_rectangle_crossed(line, lines)
-        
-        return is_line_crossed
-        
-    
-    def get_nearest_boxes(self, box_item):
-        
-        """
-        Функция возвращает ближающие прямоугольники
-        рядом с box_item на расстоянии self.paragraph_threshold
-        """
-        
-        res = []
-        x1, y1, x2, y2 = box_item.get_box_item()
-        w = x2 - x1
-        h = y2 - y1
-        
-        points = []
-        points.append( (x1, y1) )
-        points.append( (x1 + w // 2, y1) )
-        points.append( (x1 + w, y1) )
-        points.append( (x1 + w, y1 + h // 2) )
-        points.append( (x1 + w, y1 + h) )
-        points.append( (x1 + w // 2, y1 + h) )
-        points.append( (x1, y1 + h) )
-        points.append( (x1, y1 + h // 2) )
-        
-        nearest_search_points = []
-        
-        for point in points:
-            
-            x, y = point
-            
-            x1 = x // self.paragraph_threshold 
-            y1 = y // self.paragraph_threshold
-            
-            for direction in self.directions:
-                dx, dy = self.directions[direction]
-                
-                x2 = x1 + dx
-                y2 = y1 + dy
-                
-                if not( (x2, y2) in nearest_search_points ):
-                    nearest_search_points.append( (x2, y2) )
-        
-        for point in nearest_search_points:
-            x2, y2 = point
-            
-            if x2 in self.boxes_hash:
-                if y2 in self.boxes_hash[x2]:
-                    hash_points = self.boxes_hash[x2][y2]
-                    for hash_point in hash_points:
-                        
-                        x3, y3, box_index = hash_point
-                        if (x3 - x) * (x3 - x) + (y3 - y) * (y3 - y) <= self.paragraph_threshold2:
-                            if not(box_index in res):
-                                res.append( box_index )
-        
-        return res
+        self.lines = BoxHash(lines, "line", self.paragraph_threshold)
     
     
     def get_paragraph(self, box_index):
@@ -825,7 +697,7 @@ class ParagraphSearcher:
         queue.append( box_index )
         self.boxes_matrix[box_index] = 0
         
-        box_item = self.boxes[box_index]
+        box_item = self.boxes.items[box_index]
         paragraph = {
             "x1": box_item.x1,
             "y1": box_item.y1,
@@ -837,7 +709,7 @@ class ParagraphSearcher:
         while len(queue) > 0:
         
             box_index = queue.pop()
-            box_item = self.boxes[box_index]
+            box_item = self.boxes.items[box_index]
             box_item_center_point = box_item.get_box_center()
             
             # Расширить границы параграфа
@@ -850,13 +722,14 @@ class ParagraphSearcher:
             if paragraph["y2"] < box_item.y2:
                 paragraph["y2"] = box_item.y2
             
-            neighbors_indexes = self.get_nearest_boxes(box_item)
+            neighbors_indexes = self.boxes.get_nearest_items(box_index)
             
             for index in neighbors_indexes:
                 if self.boxes_matrix[index] == 1:
                     
-                    neighbor_box_item = self.boxes[index]
+                    neighbor_box_item = self.boxes.items[index]
                     neighbor_box_center_point = neighbor_box_item.get_box_center()
+                    
                     line = BoxItem( (
                         box_item_center_point[0], box_item_center_point[1],
                         neighbor_box_center_point[0], neighbor_box_center_point[1]
@@ -867,12 +740,11 @@ class ParagraphSearcher:
                             > self.line_threshold:
                             break
                     
-                    if self.is_lines_crossed(line):
+                    if self.lines.is_line_cross(line):
                         break
-                        
-                    self.boxes_matrix[index] = 0
                     
                     # Добавить в очередь
+                    self.boxes_matrix[index] = 0
                     queue.append(index)
         
         paragraph["w"] = paragraph["x2"] - paragraph["x1"]
@@ -936,7 +808,7 @@ class ParagraphSearcher:
                 line = BoxItem( (box_center_point[0], box_center_point[1],
                     merged_box_center_point[0], merged_box_center_point[1]) )
                 
-                if not self.is_lines_crossed(line):
+                if not self.lines.is_line_cross(line):
                     if is_rectangle_cross(box, merged_box, distance):
                         
                         x1 = min(box.x1, merged_box.x1)
