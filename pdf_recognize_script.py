@@ -56,10 +56,12 @@ def get_image_from_pdf(file_name, page_number):
     return image
 
 
-def descew_image(image):
+def descew_orig_image(res):
     
     import PIL
     from wand.image import Image
+    
+    image = res["orig_image"]
     
     with Image.from_array(image) as img_wand:
         
@@ -70,7 +72,9 @@ def descew_image(image):
         img_pil = PIL.Image.open( io.BytesIO(img_buffer) ).convert("RGB")
         image2 = np.array(img_pil)
     
-    return image2
+    res["orig_image"] = image2
+    
+    return res
     
 
 class BoxItem:
@@ -103,11 +107,22 @@ class BoxItem:
         self.w = size[2] - size[0]
         self.h = size[3] - size[1]
         
+        self.center_x = (self.x1 + self.x2) // 2
+        self.center_y = (self.y1 + self.y2) // 2
+        
     def get_box_item(self):
         return (self.x1, self.y1, self.x2, self.y2)
     
     def get_box_center(self):
-        return (self.x1 + self.w // 2, self.y1 + self.h // 2)
+        return (self.center_x, self.center_y)
+    
+    def get_box_angles(self):
+        return [
+            (self.x1, self.y1),
+            (self.x2, self.y1),
+            (self.x2, self.y2),
+            (self.x1, self.y2),
+        ]
     
     def copy(self):
         item = BoxItem( self.get_box_item() )
@@ -271,11 +286,11 @@ def get_chars_boxes(res):
         return True
     
     # Функция убирает слишком большие прямоугольники,
-    # которые скорее всего не являеются буквами
+    # которые скорее всего не являются буквами
     def remove_big_box(box):
         w = box.w
         h = box.h
-        if w > 30 and h > 30 and w * h > 10000:
+        if w > 50 and h > 50 and w * h > 1000:
             return False
         return True
     
@@ -412,7 +427,7 @@ def filter_chars_boxes(res):
     return res
 
 
-def get_paragraph_box(res, threshold=25):
+def get_paragraph_boxes(res, threshold=25):
     
     """
     Функция получает параграфы, объединяя chars_boxes методом
@@ -425,15 +440,36 @@ def get_paragraph_box(res, threshold=25):
     search.get_all_paragraph()
     search.merge(5)
     
-    res["paragraph_boxes"] = list(search.paragraphes)
+    res["paragraph_boxes"] = search.paragraphes
     
     return res
 
 
-
-def recognize_text_in_boxes(image, boxes, kind="tesseract", easyocr_reader=None):
+def sort_paragraph_boxes(res):
     
-    for box in boxes:
+    """
+    Сортирует параграфы по линиям
+    """
+    
+    boxes = res["paragraph_boxes"]
+    
+    width = res["orig_image"].shape[1]
+    arr = [ (index, box, box.get_box_center()) for index, box in enumerate(boxes) ]
+    arr.sort( key=lambda item: item[2][1] * width + item[2][0] )
+    
+    res["paragraph_boxes"] = [ item[1] for item in arr ]
+    
+    return res
+    
+
+def recognize_paragraph_boxes(res, kind="easyocr", easyocr_reader=None):
+    
+    """
+    Функция распознает текст в параграфах
+    """
+    
+    image = res["orig_image"]
+    for box in res["paragraph_boxes"]:
         cell = image[box.y1:box.y2, box.x1:box.x2]
         
         if kind == "easyocr":
@@ -445,6 +481,8 @@ def recognize_text_in_boxes(image, boxes, kind="tesseract", easyocr_reader=None)
         elif kind == "tesseract":
             text = pytesseract.image_to_string(cell, lang='kaz')
             box.text = text.strip().replace("\n", " ").lower()
+    
+    return res
 
 
 class ParagraphSearcher:
@@ -453,18 +491,19 @@ class ParagraphSearcher:
     Класс, который объединяет боксы в параграфы методом поиска в ширину
     """
     
-    def __init__(self, threshold):
+    def __init__(self, paragraph_threshold, line_threshold):
         
+        self.mode = None
         self.boxes = []
         self.boxes_hash = {}
         self.boxes_matrix = []
         self.lines = []
         self.lines_hash_x = {}
         self.lines_hash_y = {}
+        self.line_threshold = line_threshold
         self.paragraphes = []
-        self.threshold = threshold
-        self.threshold2 = threshold * threshold
-        self.mode = None
+        self.paragraph_threshold = paragraph_threshold
+        self.paragraph_threshold2 = paragraph_threshold * paragraph_threshold
         
         self.directions = {
             0: [0, 0],
@@ -487,6 +526,7 @@ class ParagraphSearcher:
         
         self.boxes = list(boxes)
         self.boxes_matrix = [1] * len(self.boxes)
+        self.boxes.sort(key = lambda box: box.w * box.h)
         
         for box_index in range(len(self.boxes)):
             
@@ -507,8 +547,8 @@ class ParagraphSearcher:
     
     def addPoint(self, x, y, box_index):
         
-        x1 = x // self.threshold
-        y1 = y // self.threshold
+        x1 = x // self.paragraph_threshold
+        y1 = y // self.paragraph_threshold
         
         if not(x1 in self.boxes_hash):
             self.boxes_hash[x1] = {}
@@ -529,10 +569,10 @@ class ParagraphSearcher:
         self.lines = list(lines)
         for line in self.lines:
             
-            x1 = line.x1 // self.threshold
-            x2 = line.x2 // self.threshold
-            y1 = line.y1 // self.threshold
-            y2 = line.y2 // self.threshold
+            x1 = line.x1 // self.paragraph_threshold
+            x2 = line.x2 // self.paragraph_threshold
+            y1 = line.y1 // self.paragraph_threshold
+            y2 = line.y2 // self.paragraph_threshold
             
             if not(x1 in self.lines_hash_x):
                 self.lines_hash_x[x1] = []
@@ -555,10 +595,10 @@ class ParagraphSearcher:
         Возвращает список линий, находящихся в границах x1-x2 и y1-y2
         """
         
-        x1 = line.x1 // self.threshold
-        x2 = line.x2 // self.threshold
-        y1 = line.y1 // self.threshold
-        y2 = line.y2 // self.threshold
+        x1 = line.x1 // self.paragraph_threshold
+        x2 = line.x2 // self.paragraph_threshold
+        y1 = line.y1 // self.paragraph_threshold
+        y2 = line.y2 // self.paragraph_threshold
         
         res = []
         
@@ -590,7 +630,7 @@ class ParagraphSearcher:
         
         """
         Функция возвращает ближающие прямоугольники
-        рядом с box_item на расстоянии self.threshold
+        рядом с box_item на расстоянии self.paragraph_threshold
         """
         
         res = []
@@ -614,8 +654,8 @@ class ParagraphSearcher:
             
             x, y = point
             
-            x1 = x // self.threshold 
-            y1 = y // self.threshold
+            x1 = x // self.paragraph_threshold 
+            y1 = y // self.paragraph_threshold
             
             for direction in self.directions:
                 dx, dy = self.directions[direction]
@@ -635,7 +675,7 @@ class ParagraphSearcher:
                     for hash_point in hash_points:
                         
                         x3, y3, box_index = hash_point
-                        if (x3 - x) * (x3 - x) + (y3 - y) * (y3 - y) <= self.threshold2:
+                        if (x3 - x) * (x3 - x) + (y3 - y) * (y3 - y) <= self.paragraph_threshold2:
                             if not(box_index in res):
                                 res.append( box_index )
         
@@ -655,10 +695,10 @@ class ParagraphSearcher:
         box_item = self.boxes[box_index]
         x1, y1, x2, y2 = box_item.get_box_item()
         paragraph = {
-            "x": x1,
-            "y": y1,
-            "right": x2,
-            "bottom": y2,
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
         }
         
         while len(queue) > 0:
@@ -666,6 +706,16 @@ class ParagraphSearcher:
             box_index = queue.pop()
             box_item = self.boxes[box_index]
             box_item_center_point = box_item.get_box_center()
+            
+            # Расширить границы параграфа
+            if paragraph["x1"] > box_item.x1:
+                paragraph["x1"] = box_item.x1
+            if paragraph["y1"] > box_item.y1:
+                paragraph["y1"] = box_item.y1
+            if paragraph["x2"] < box_item.x2:
+                paragraph["x2"] = box_item.x2
+            if paragraph["y2"] < box_item.y2:
+                paragraph["y2"] = box_item.y2
             
             neighbors_indexes = self.get_nearest_boxes(box_item)
             
@@ -683,27 +733,17 @@ class ParagraphSearcher:
                         
                         self.boxes_matrix[index] = 0
                         
-                        # Расширить границы параграфа
-                        if paragraph["x"] > neighbor_box_item.x1:
-                            paragraph["x"] = neighbor_box_item.x1
-                        if paragraph["y"] > neighbor_box_item.y1:
-                            paragraph["y"] = neighbor_box_item.y1
-                        if paragraph["right"] < neighbor_box_item.x2:
-                            paragraph["right"] = neighbor_box_item.x2
-                        if paragraph["bottom"] < neighbor_box_item.y2:
-                            paragraph["bottom"] = neighbor_box_item.y2
-                        
                         # Добавить в очередь
                         queue.append(index)
         
-        paragraph["w"] = paragraph["right"] - paragraph["x"]
-        paragraph["h"] = paragraph["bottom"] - paragraph["y"]
+        paragraph["w"] = paragraph["x2"] - paragraph["x1"]
+        paragraph["h"] = paragraph["y2"] - paragraph["y1"]
         
         if paragraph["w"] <= 0 or paragraph["h"] <= 0:
             paragraph = None
     
         if paragraph is not None:
-            paragraph = ( paragraph["x"], paragraph["y"], paragraph["right"], paragraph["bottom"] )
+            paragraph = ( paragraph["x1"], paragraph["y1"], paragraph["x2"], paragraph["y2"] )
         
         return BoxItem(paragraph)
     
@@ -737,7 +777,7 @@ class ParagraphSearcher:
             box_index = self.get_next_index()
     
     
-    def merge(self, threshold=0):
+    def merge(self, distance=0):
         
         """
         Функция объединяет параграфы, которые расоложены рядом
@@ -759,7 +799,7 @@ class ParagraphSearcher:
                     merged_box_center_point[0], merged_box_center_point[1]) )
                 
                 if not self.is_lines_crossed(line):
-                    if is_rectangle_cross(box, merged_box, threshold):
+                    if is_rectangle_cross(box, merged_box, distance):
                         
                         x1 = min(box.x1, merged_box.x1)
                         y1 = min(box.y1, merged_box.y1)
@@ -893,129 +933,49 @@ def get_text_words(text):
     return words
 
 
-def box_classification(box):
+def classify_the_text(res):
     
     """
     Определяет вероятность класса для региона
     """
     
-    words = get_text_words(box.text)
-    
-    # Предсказываем класс
-    predict = [0, 0, 0, 0]
-    predict[1] = keywords_classification(words, TEXT_CATEGORY_SUMMA)
-    predict[2] = keywords_classification(words, TEXT_CATEGORY_WORKERS)
-    predict[3] = number_classification(words)
-    
-    box.category = 0
-    box.category_rel = 0
-    box.category_predict = predict
-    
-    # Максимальное предсказание
-    index = np.argmax(predict)
-    if predict[index] > 0.65:
-        box.category = index
-        box.category_rel = predict[index]
-
-
-def box_search_get_distance(box1, box2, kind):
-    
-    """
-    Сравнивает два региона и возвращает дистанцию между блоками
-    Или -1, если два региона не относятся к kind
-    """
-    
-    if kind == "right":
+    for box in res["paragraph_boxes"]:
         
-        if box2.x1 < box1.x2 - 10:
-            return -1
+        words = get_text_words(box.text)
         
-        if box2.y2 < box1.y1:
-            return -1
+        # Предсказываем класс
+        predict = [0, 0, 0, 0]
+        predict[1] = keywords_classification(words, TEXT_CATEGORY_SUMMA)
+        predict[2] = keywords_classification(words, TEXT_CATEGORY_WORKERS)
+        predict[3] = number_classification(words)
         
-        if box2.y1 > box1.y2:
-            return -1
+        box.category = 0
+        box.category_rel = 0
+        box.category_predict = predict
+        
+        # Максимальное предсказание
+        index = np.argmax(predict)
+        if predict[index] > 0.65:
+            box.category = index
+            box.category_rel = predict[index]
     
-    if kind == "bottom":
-        
-        if box2.y1 < box1.y2 - 10:
-            return -1
-        
-        if box2.x2 < box1.x1:
-            return -1
-        
-        if box2.x1 > box1.x2:
-            return -1
-    
-    c1 = box1.get_box_center()
-    c2 = box2.get_box_center()
-    
-    d = math.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
-    return d
+    return res
 
 
-def box_search_number_kind(boxes, index, kind):
-    
-    """
-    Возвращает index ближайшего блока с числом справа или снизу.
-    """
-    
-    box1 = boxes[index]
-    find_box = None
-    find_d = None
-    
-    for box2_index in range(len(boxes)):
-        box2 = boxes[box2_index]
-        if index != box2_index:
-            d = box_search_get_distance(box1, box2, kind)
-            if d >= 0 and box2.category == 3:
-                if find_d is None or find_d > d:
-                    find_d = d
-                    find_box = box2
-    
-    if find_box and find_box.category != 3:
-        find_box = None
-        find_d = None
-    
-    return find_box, find_d
-    
-
-def box_search_number(boxes, index):
-    
-    """
-    Возвращает index ближайшего блока с числом
-    """
-    
-    box_right, box_right_d = box_search_number_kind(boxes, index, "right")
-    box_bottom, box_bottom_d = box_search_number_kind(boxes, index, "bottom")
-    
-    if box_right_d is not None and box_bottom_d is not None:
-        if box_right_d < box_bottom_d:
-            return box_right, box_right_d, "right"
-        else:
-            return box_bottom, box_bottom_d, "bottom"
-    
-    if box_right_d is not None:
-        return box_right, box_right_d, "right"
-    
-    if box_bottom_d is not None:
-        return box_bottom, box_bottom_d, "bottom"
-    
-    return None
-
-
-def get_all_boxes_text(boxes):
+def get_all_boxes_text(res):
     
     data = {
-        "Index": [],
+        "Y, X": [],
         "Category": [],
         "Rel": [],
         "Text": [],
     }
-
-    for index in range(len(boxes)):
-        box = boxes[index]
-        data["Index"].append(index)
+    
+    boxes = res["paragraph_boxes"]
+    
+    for box in boxes:
+        box_center = box.get_box_center()
+        data["Y, X"].append( (box_center[1], box_center[0]) )
         data["Category"].append(box.category)
         data["Rel"].append(box.category_rel)
         data["Text"].append(box.text)
@@ -1023,20 +983,63 @@ def get_all_boxes_text(boxes):
     return data
 
 
-def get_all_boxes_recognized_text(boxes):
+def box_search_get_distance(box1, box2):
+    
+    """
+    Сравнивает два региона и возвращает дистанцию между блоками
+    """
+    
+    c1 = box1.get_box_angles()
+    c2 = box2.get_box_angles()
+    min_d = None
+    
+    for point1 in c1:
+        for point2 in c2:
+            d = math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+            if min_d is None or min_d > d:
+                min_d = d
+    
+    return min_d
+
+
+def box_search_number(boxes, index, distance=10):
+    
+    box1 = boxes[index]
+    find_box = None
+    find_d = None
+    find_index = None
+    
+    for j in range( min(index - distance, 0), max(index + distance + 1, len(boxes) - 1) ):
+        box2 = boxes[j]
+        if box2.category == 3:
+            d = box_search_get_distance(box1, box2)
+            if find_d is None or find_d > d:
+                find_d = d
+                find_box = box2
+                find_index = j
+    
+    return {
+        "box": find_box,
+        "d": find_d,
+        "index": find_index,
+    }
+
+
+def get_all_boxes_recognized_text(res):
     
     data = {
         "Index": [],
         "Category": [],
         "Rel": [],
         "Text": [],
+        "Index2": [],
         "Number": [],
         "Distance": [],
-        "Kind": [],
     }
-
-    for index in range(len(boxes)):
-        box = boxes[index]
+    
+    boxes = res["paragraph_boxes"]
+    
+    for index, box in enumerate(boxes):
         if box.category in [1, 2]:
             
             box.box_number = box_search_number(boxes, index)
@@ -1047,12 +1050,12 @@ def get_all_boxes_recognized_text(boxes):
             data["Text"].append(box.text)
             
             if box.box_number is not None:
-                data["Number"].append(box.box_number[0].text)
-                data["Distance"].append(box.box_number[1])
-                data["Kind"].append(box.box_number[2])
+                data["Number"].append(box.box_number["box"].text)
+                data["Distance"].append(box.box_number["d"])
+                data["Index2"].append(box.box_number["index"])
             else:
                 data["Number"].append(None)
                 data["Distance"].append(None)
-                data["Kind"].append(None)
+                data["Index2"].append(None)
     
     return data
